@@ -18,15 +18,25 @@ class AnalysisRequest(BaseModel):
     price_interval: str = "1h"
 
 # --- FIREBASE KURULUMU ---
-# serviceAccountKey.json dosyasının bu script ile aynı klasörde olduğundan emin olun
 try:
-    cred = credentials.Certificate("serviceAccountKey.json")
+    # Önce Environment Variable kontrolü yap (Render için)
+    env_creds = os.environ.get("FIREBASE_CREDENTIALS_JSON")
+    
+    if env_creds:
+        print("🌍 Render ortamı algılandı, kimlik bilgileri Environment Variable'dan okunuyor...")
+        cred_dict = json.loads(env_creds)
+        cred = credentials.Certificate(cred_dict)
+    else:
+        # Yoksa yerel dosyaya bak (Kendi bilgisayarın için)
+        print("💻 Yerel ortam algılandı, dosya okunuyor...")
+        cred = credentials.Certificate("serviceAccountKey.json")
+
     firebase_admin.initialize_app(cred)
     db = firestore.client()
     print("✅ Firebase Bağlantısı Başarılı")
+    
 except Exception as e:
     print(f"❌ Firebase Bağlantı Hatası: {e}")
-    # Hata durumunda uygulamanın çökmemesi için boş db değişkeni
     db = None
 
 # --- GLOBAL DEĞİŞKENLER ---
