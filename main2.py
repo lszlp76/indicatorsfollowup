@@ -8,45 +8,139 @@ import uvicorn
 import threading
 import time
 from datetime import datetime
+import firebase_admin
+from firebase_admin import credentials, firestore, messaging
 
 # --- VERİ MODELLERİ ---
 class AnalysisRequest(BaseModel):
     symbol: str
-    rsi_interval: str = "1h"   # RSI ve MACD hesaplaması için (Örn: 15m)
-    price_interval: str = "1h" # Fiyat değişim yüzdesi için (Örn: 1d)
+    rsi_interval: str = "1h"
+    price_interval: str = "1h"
 
-# --- GLOBAL ÖNBELLEK ---
+# --- FIREBASE KURULUMU ---
+# serviceAccountKey.json dosyasının bu script ile aynı klasörde olduğundan emin olun
+try:
+    cred = credentials.Certificate("serviceAccountKey.json")
+    firebase_admin.initialize_app(cred)
+    db = firestore.client()
+    print("✅ Firebase Bağlantısı Başarılı")
+except Exception as e:
+    print(f"❌ Firebase Bağlantı Hatası: {e}")
+    # Hata durumunda uygulamanın çökmemesi için boş db değişkeni
+    db = None
+
+# --- GLOBAL DEĞİŞKENLER ---
 MARKET_CACHE = []
 LAST_UPDATE = None
 DEFAULT_SYMBOLS = ['THYAO.IS', 'GARAN.IS', 'BTC-USD', 'ETH-USD']
 
-# --- ARKA PLAN GÖREVİ ---
-def background_updater():
-    global MARKET_CACHE, LAST_UPDATE
-    print("🔄 Arka plan veri motoru çalıştırıldı (Varsayılan Hisseler)...")
+# Spam Bildirim Önleme Sözlüğü: {(user_id, symbol, type): timestamp}
+ALARM_COOLDOWNS = {} 
+COOLDOWN_SECONDS = 3600  # Aynı alarm için 1 saat boyunca tekrar bildirim atma
+
+# --- ARKA PLAN GÖREVLERİ ---
+
+def alarm_monitor_system():
+    """Tüm kullanıcıların alarmlarını kontrol eder ve bildirim atar."""
+    print("🔔 Alarm Takip Sistemi Başlatıldı...")
     
     while True:
+        if not db:
+            time.sleep(60)
+            continue
+            
         try:
-            temp_data = []
-            for sym in DEFAULT_SYMBOLS:
-                # Arka planda varsayılan olarak 1 Saatlik RSI ve 1 Günlük (1d) fiyat değişimi baz alalım
-                data = process_stock_analysis(sym, rsi_interval="1h", price_interval="1d")
-                if data:
-                    temp_data.append(data)
+            # 1. Tüm kullanıcıları getir (fcmToken'ı olanları)
+            # Not: Çok büyük sistemlerde bu sorgu optimize edilmelidir.
+            users_ref = db.collection('users').stream()
             
-            if temp_data:
-                MARKET_CACHE = temp_data
-                LAST_UPDATE = datetime.now()
+            for user in users_ref:
+                user_data = user.to_dict()
+                fcm_token = user_data.get('fcmToken')
+                user_id = user.id
                 
+                if not fcm_token:
+                    continue # Token yoksa bildirim atamayız
+                
+                # 2. Kullanıcının alarmlarını çek
+                alarms_ref = db.collection('users').document(user_id).collection('alarms').stream()
+                
+                for alarm in alarms_ref:
+                    alarm_data = alarm.to_dict()
+                    symbol = alarm_data.get('symbol')
+                    indicator = alarm_data.get('indicator') # 'price', 'rsi', 'macd'
+                    condition = alarm_data.get('condition') # 'gt', 'lt'
+                    try:
+                        threshold = float(alarm_data.get('value', 0))
+                    except:
+                        continue
+
+                    # Cooldown Kontrolü (Daha önce bildirim attık mı?)
+                    cooldown_key = (user_id, symbol, indicator, condition)
+                    last_notification = ALARM_COOLDOWNS.get(cooldown_key)
+                    if last_notification and (time.time() - last_notification) < COOLDOWN_SECONDS:
+                        continue # Henüz bekleme süresi dolmadı
+
+                    # 3. Güncel veriyi analiz et
+                    # Alarm kontrolü için standart olarak 1h RSI ve 1h Price kullanıyoruz
+                    stock_data = process_stock_analysis(symbol, "1h", "1h")
+                    
+                    if not stock_data:
+                        continue
+                        
+                    current_val = 0.0
+                    if indicator == 'price':
+                        current_val = stock_data.get('price', 0)
+                    elif indicator == 'rsi':
+                        current_val = stock_data.get('rsi', 0)
+                    elif indicator == 'macd':
+                        current_val = stock_data.get('macd', 0)
+                    
+                    # 4. Koşulu Kontrol Et
+                    triggered = False
+                    if condition == 'gt' and current_val > threshold:
+                        triggered = True
+                    elif condition == 'lt' and current_val < threshold:
+                        triggered = True
+                        
+                    if triggered:
+                        print(f"🚨 ALARM TETİKLENDİ: {user_id} -> {symbol} {indicator} {current_val}")
+                        # 5. Bildirim Gönder
+                        send_push_notification(
+                            token=fcm_token,
+                            title=f"Alarm: {symbol}",
+                            body=f"{symbol} {indicator.upper()} değeri {threshold} sınırını aştı! Şu an: {current_val:.2f}"
+                        )
+                        # Cooldown'a ekle
+                        ALARM_COOLDOWNS[cooldown_key] = time.time()
+                        
         except Exception as e:
-            print(f"⚠️ Arka Plan Hatası: {e}")
+            print(f"⚠️ Alarm Döngüsü Hatası: {e}")
             
-        time.sleep(30) 
+        # Her 60 saniyede bir tüm alarmları kontrol et
+        time.sleep(60)
+
+def send_push_notification(token, title, body):
+    try:
+        message = messaging.Message(
+            notification=messaging.Notification(
+                title=title,
+                body=body,
+            ),
+            token=token,
+        )
+        response = messaging.send(message)
+        print(f"📨 Bildirim Gönderildi: {response}")
+        return response
+    except Exception as e:
+        print(f"❌ FCM Gönderim Hatası: {e}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    worker = threading.Thread(target=background_updater, daemon=True)
-    worker.start()
+    # Alarm sistemini ayrı bir thread'de başlat
+    alarm_thread = threading.Thread(target=alarm_monitor_system, daemon=True)
+    alarm_thread.start()
+    
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -66,7 +160,6 @@ def calculate_rsi(series, period=14):
     delta = series.diff(1)
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
-    # Wilder's Smoothing (TradingView benzeri)
     avg_gain = gain.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
     
@@ -82,7 +175,6 @@ def calculate_macd(series, slow=26, fast=12, signal=9):
     return macd
 
 def determine_period(interval):
-    """Interval'e göre ne kadar geçmiş veri çekeceğimizi belirler"""
     if interval in ['1m', '2m', '5m']: return '1d'
     if interval in ['15m', '30m', '90m']: return '5d'
     if interval in ['1h', '1d']: return '2mo'
@@ -90,7 +182,6 @@ def determine_period(interval):
     return '2mo'
 
 def get_historical_data(symbol, interval):
-    """Belirli bir interval için veri çeker"""
     try:
         ticker = yf.Ticker(symbol)
         period = determine_period(interval)
@@ -100,50 +191,31 @@ def get_historical_data(symbol, interval):
         return pd.DataFrame()
 
 def process_stock_analysis(symbol, rsi_interval, price_interval):
-    """
-    RSI'yı rsi_interval'a göre,
-    Fiyat Değişimini price_interval'a göre hesaplar ve birleştirir.
-    """
     try:
-        # 1. RSI ve MACD için Veri Çek (Teknik Analiz Verisi)
+        # 1. Teknik Veri (RSI, MACD)
         df_tech = get_historical_data(symbol, rsi_interval)
         
-        # Eğer yfinance 4h desteklemiyorsa manuel resample yapılabilir ama 
-        # şimdilik temel intervaller üzerinden gidiyoruz.
         if df_tech.empty or len(df_tech) < 20: 
-            # Veri yoksa veya yetersizse None dön
             return None
 
-        # RSI ve MACD Hesapla
         rsi_val = calculate_rsi(df_tech['Close']).iloc[-1]
         macd_val = calculate_macd(df_tech['Close']).iloc[-1]
-        
-        # Güncel fiyat (Teknik analiz verisindeki son kapanış fiyatı - bu genellikle canlı fiyattır)
         current_price = float(df_tech['Close'].iloc[-1])
 
-        # 2. Fiyat Değişimi Hesapla
+        # 2. Fiyat Değişimi
         change_val = 0.0
         
         if rsi_interval == price_interval:
-            # Eğer iki interval aynıysa, fazladan istek atmaya gerek yok
-            # Bir önceki mumun kapanışına göre değişim
             prev_close = df_tech['Close'].iloc[-2] if len(df_tech) > 1 else current_price
             change_val = ((current_price - prev_close) / prev_close) * 100
         else:
-            # Farklı interval ise (Örn: RSI 15m, Fiyat 1d)
             df_price = get_historical_data(symbol, price_interval)
-            
             if not df_price.empty and len(df_price) > 1:
-                # Price interval '1d' (günlük) ise:
-                # iloc[-1] -> Bugün (canlı mum)
-                # iloc[-2] -> Dün (kapanmış mum)
-                # Değişimi dünkü kapanışa göre hesapla
                 last_closed_candle = df_price['Close'].iloc[-2]
                 change_val = ((current_price - last_closed_candle) / last_closed_candle) * 100
             else:
-                # Fiyat verisi çekilemediyse 0 dön (veya RSI verisinden tahmini değişim)
                 change_val = 0.0    
-            print(f"✅ {symbol} analizi tamamlandı: Fiyat={current_price:.2f} price interval {price_interval}, RSI={rsi_val:.2f} interval {rsi_interval}, MACD={macd_val:.2f}, Değişim={change_val:.2f}%")
+        
         return {
             "id": hash(symbol + rsi_interval + price_interval),
             "symbol": symbol.replace('.IS', '').replace('-USD', ''),
@@ -152,8 +224,8 @@ def process_stock_analysis(symbol, rsi_interval, price_interval):
             "rsi": float(rsi_val) if not pd.isna(rsi_val) else 50.0,
             "macd": float(macd_val) if not pd.isna(macd_val) else 0.0,
             "change": float(change_val),
-            "interval": rsi_interval,       # Bilgi amaçlı: RSI hangi grafiğe göre?
-            "price_interval": price_interval # Bilgi amaçlı: Değişim hangi grafiğe göre?
+            "interval": rsi_interval,
+            "price_interval": price_interval
         }
 
     except Exception as e:
@@ -168,19 +240,12 @@ def read_root():
 
 @app.post("/api/analyze")
 def analyze_stock(request: AnalysisRequest):
-    """Kullanıcının belirlediği İKİ AYRI intervale göre analiz yapar"""
     symbol = request.symbol.upper().strip()
-    
-    # Geçerli aralıklar
     valid_intervals = ['1m', '2m', '5m', '15m', '30m', '60m', '90m', '1h', '4h', '1d', '5d', '1wk', '1mo', '3mo', '1y', '5y']
     
-    # Fallback kontrolleri (Geçersiz interval gelirse 1h yap)
-    print("gelen rsi interval:", request.rsi_interval)
     rsi_int = request.rsi_interval if request.rsi_interval in valid_intervals else "1h"
     price_int = request.price_interval if request.price_interval in valid_intervals else "1h"
 
-    print(f"🔍 Analiz İsteği: {symbol} | RSI: {rsi_int} | Fiyat: {price_int}")
-    
     data = process_stock_analysis(symbol, rsi_interval=rsi_int, price_interval=price_int)
     
     if data:
@@ -189,5 +254,5 @@ def analyze_stock(request: AnalysisRequest):
         raise HTTPException(status_code=404, detail="Veri bulunamadı.")
 
 if __name__ == "__main__":
-    print("\n🚀 BORSA API (V4 - Çift Interval Modu)")
+    print("\n🚀 BORSA API (V5 - FCM Push Notification Modu)")
     uvicorn.run(app, host="0.0.0.0", port=8001)
