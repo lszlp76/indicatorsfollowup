@@ -1,5 +1,5 @@
-import os   # <-- EKSİK OLAN BU
-import json # <-- BU DA GEREKLİ OLACAK
+import os
+import json
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -11,7 +11,7 @@ import threading
 import time
 from datetime import datetime
 import firebase_admin
-from firebase_admin import credentials, firestore, messaging
+from firebase_admin import credentials, firestore, messaging, auth
 
 # --- VERİ MODELLERİ ---
 class AnalysisRequest(BaseModel):
@@ -63,7 +63,6 @@ def alarm_monitor_system():
             
         try:
             # 1. Tüm kullanıcıları getir (fcmToken'ı olanları)
-            # Not: Çok büyük sistemlerde bu sorgu optimize edilmelidir.
             users_ref = db.collection('users').stream()
             
             for user in users_ref:
@@ -84,7 +83,6 @@ def alarm_monitor_system():
                     if alarm_data.get('isTriggered') == True:
                         continue
 
-
                     symbol = alarm_data.get('symbol')
                     indicator = alarm_data.get('indicator') # 'price', 'rsi', 'macd'
                     condition = alarm_data.get('condition') # 'gt', 'lt'
@@ -100,7 +98,6 @@ def alarm_monitor_system():
                         continue # Henüz bekleme süresi dolmadı
 
                     # 3. Güncel veriyi analiz et
-                    # Alarm kontrolü için standart olarak 1h RSI ve 1h Price kullanıyoruz
                     stock_data = process_stock_analysis(symbol, "1h", "1h")
                     
                     if not stock_data:
@@ -124,25 +121,24 @@ def alarm_monitor_system():
                     if triggered:
                         print(f"🚨 ALARM TETİKLENDİ: {user_id} -> {symbol} {indicator} {current_val}")
     
-                         # 1. Bildirimi Gönder
+                        # 1. Bildirimi Gönder
                         send_push_notification(
                             token=fcm_token,
-                           title=f"Alarm: {symbol}",
-                         body=f"{symbol} {indicator.upper()} değeri {threshold} sınırını aştı! Şu an: {current_val:.2f}",
+                            title=f"Alarm: {symbol}",
+                            body=f"{symbol} {indicator.upper()} değeri {threshold} sınırını aştı! Şu an: {current_val:.2f}",
                             user_id=user_id
-                             )
+                        )
     
-                            # 2. VERİTABANINDA ALARMI "GERÇEKLEŞTİ" OLARAK İŞARETLE (YENİ EKLENEN KISIM)
+                        # 2. VERİTABANINDA ALARMI "GERÇEKLEŞTİ" OLARAK İŞARETLE
                         try:
-                         db.collection('users').document(user_id).collection('alarms').document(alarm.id).update({
-                        'isTriggered': True,
-                        'lastTriggeredAt': firestore.SERVER_TIMESTAMP
-                           })
+                            db.collection('users').document(user_id).collection('alarms').document(alarm.id).update({
+                                'isTriggered': True,
+                                'lastTriggeredAt': firestore.SERVER_TIMESTAMP
+                            })
                         except Exception as e:
-                          print(f"Alarm güncelleme hatası: {e}")
+                            print(f"Alarm güncelleme hatası: {e}")
         
-                        # Cooldown'a ekle...
-                       
+                        # Cooldown'a ekle
                         ALARM_COOLDOWNS[cooldown_key] = time.time()
                         
         except Exception as e:
@@ -296,6 +292,31 @@ def analyze_stock(request: AnalysisRequest):
         return {"status": "success", "data": data}
     else:
         raise HTTPException(status_code=404, detail="Veri bulunamadı.")
+
+# --- YENİDEN EKLENEN HESAP SİLME FONKSİYONU ---
+@app.delete("/api/users/{user_id}")
+def delete_user_account(user_id: str):
+    if not db:
+        raise HTTPException(status_code=500, detail="Database bağlantısı yok.")
+        
+    try:
+        alarms_ref = db.collection('users').document(user_id).collection('alarms').stream()
+        for alarm in alarms_ref:
+            alarm.reference.delete()
+            
+        db.collection('users').document(user_id).delete()
+        
+        try:
+            auth.delete_user(user_id)
+        except Exception as auth_e:
+            print(f"Auth silme atlandı (Zaten silinmiş olabilir): {auth_e}")
+
+        print(f"🗑️ BAŞARILI: {user_id} ID'li kullanıcı ve tüm verileri evrenden silindi.")
+        return {"status": "success", "message": "Hesap ve tüm veriler silindi."}
+        
+    except Exception as e:
+        print(f"❌ Kullanıcı silme hatası: {e}")
+        raise HTTPException(status_code=500, detail=f"Silme işlemi başarısız: {str(e)}")
 
 if __name__ == "__main__":
     print("\n🚀 BORSA API (V5 - FCM Push Notification Modu)")
