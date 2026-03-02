@@ -121,8 +121,9 @@ def alarm_monitor_system():
                         send_push_notification(
                             token=fcm_token,
                             title=f"Alarm: {symbol}",
-                            body=f"{symbol} {indicator.upper()} değeri {threshold} sınırını aştı! Şu an: {current_val:.2f}"
-                        )
+                            body=f"{symbol} {indicator.upper()} değeri {threshold} sınırını aştı! Şu an: {current_val:.2f}",
+                            user_id=user_id
+                            )
                         # Cooldown'a ekle
                         ALARM_COOLDOWNS[cooldown_key] = time.time()
                         
@@ -132,7 +133,7 @@ def alarm_monitor_system():
         # Her 60 saniyede bir tüm alarmları kontrol et
         time.sleep(60)
 
-def send_push_notification(token, title, body):
+def send_push_notification(token, title, body, user_id=None):
     try:
         message = messaging.Message(
             notification=messaging.Notification(
@@ -145,7 +146,20 @@ def send_push_notification(token, title, body):
         print(f"📨 Bildirim Gönderildi: {response}")
         return response
     except Exception as e:
-        print(f"❌ FCM Gönderim Hatası: {e}")
+        error_msg = str(e)
+        print(f"❌ FCM Gönderim Hatası: {error_msg}")
+        
+        # Eğer token ölmüşse veya silinmişse veritabanından temizle
+        if "Requested entity was not found" in error_msg or "Unregistered" in error_msg:
+            print(f"🗑️ Ölü Token Tespit Edildi! (Kullanıcı: {user_id})")
+            if user_id and db:
+                try:
+                    db.collection('users').document(user_id).update({
+                        'fcmToken': firestore.DELETE_FIELD
+                    })
+                    print("✅ Ölü token veritabanından silindi.")
+                except Exception as db_err:
+                    print(f"Veritabanı temizlik hatası: {db_err}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
