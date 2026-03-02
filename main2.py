@@ -79,6 +79,12 @@ def alarm_monitor_system():
                 
                 for alarm in alarms_ref:
                     alarm_data = alarm.to_dict()
+                    
+                    # 1. YENİ EKLENEN KOD: Eğer alarm zaten gerçekleştiyse, bunu atla (boşuna işlemci yorma)
+                    if alarm_data.get('isTriggered') == True:
+                        continue
+
+
                     symbol = alarm_data.get('symbol')
                     indicator = alarm_data.get('indicator') # 'price', 'rsi', 'macd'
                     condition = alarm_data.get('condition') # 'gt', 'lt'
@@ -117,14 +123,26 @@ def alarm_monitor_system():
                         
                     if triggered:
                         print(f"🚨 ALARM TETİKLENDİ: {user_id} -> {symbol} {indicator} {current_val}")
-                        # 5. Bildirim Gönder
+    
+                         # 1. Bildirimi Gönder
                         send_push_notification(
                             token=fcm_token,
-                            title=f"Alarm: {symbol}",
-                            body=f"{symbol} {indicator.upper()} değeri {threshold} sınırını aştı! Şu an: {current_val:.2f}",
+                           title=f"Alarm: {symbol}",
+                         body=f"{symbol} {indicator.upper()} değeri {threshold} sınırını aştı! Şu an: {current_val:.2f}",
                             user_id=user_id
-                            )
-                        # Cooldown'a ekle
+                             )
+    
+                            # 2. VERİTABANINDA ALARMI "GERÇEKLEŞTİ" OLARAK İŞARETLE (YENİ EKLENEN KISIM)
+                        try:
+                         db.collection('users').document(user_id).collection('alarms').document(alarm.id).update({
+                        'isTriggered': True,
+                        'lastTriggeredAt': firestore.SERVER_TIMESTAMP
+                           })
+                        except Exception as e:
+                          print(f"Alarm güncelleme hatası: {e}")
+        
+                        # Cooldown'a ekle...
+                       
                         ALARM_COOLDOWNS[cooldown_key] = time.time()
                         
         except Exception as e:
