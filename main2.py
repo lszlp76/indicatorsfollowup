@@ -92,7 +92,8 @@ def alarm_monitor_system():
                         continue
 
                     # Cooldown Kontrolü (Daha önce bildirim attık mı?)
-                    cooldown_key = (user_id, symbol, indicator, condition)
+                    # cooldown_key = (user_id, symbol, indicator, condition)
+                    cooldown_key = alarm.id
                     last_notification = ALARM_COOLDOWNS.get(cooldown_key)
                     if last_notification and (time.time() - last_notification) < COOLDOWN_SECONDS:
                         continue # Henüz bekleme süresi dolmadı
@@ -126,7 +127,9 @@ def alarm_monitor_system():
                             token=fcm_token,
                             title=f"Alarm: {symbol}",
                             body=f"{symbol} {indicator.upper()} değeri {threshold} sınırını aştı! Şu an: {current_val:.2f}",
-                            user_id=user_id
+                            user_id=user_id,
+                            alarm_id=alarm.id # <-- YENİ EKLENEN SATIR: Telefon bildirimleri ezmesin diye
+
                         )
     
                         # 2. VERİTABANINDA ALARMI "GERÇEKLEŞTİ" OLARAK İŞARETLE
@@ -147,12 +150,24 @@ def alarm_monitor_system():
         # Her 60 saniyede bir tüm alarmları kontrol et
         time.sleep(60)
 
-def send_push_notification(token, title, body, user_id=None):
+def send_push_notification(token, title, body, user_id=None, alarm_id=None):
     try:
         message = messaging.Message(
             notification=messaging.Notification(
                 title=title,
                 body=body,
+            ),
+            # ANDROID İÇİN: Bildirimlerin üst üste binip ezilmesini engeller
+            android=messaging.AndroidConfig(
+                notification=messaging.AndroidNotification(
+                    tag=str(alarm_id) if alarm_id else "default"
+                )
+            ),
+            # IOS İÇİN: Bildirimlerin üst üste binip ezilmesini engeller
+            apns=messaging.APNSConfig(
+                headers={
+                    'apns-collapse-id': str(alarm_id) if alarm_id else "default"
+                }
             ),
             token=token,
         )
@@ -175,6 +190,7 @@ def send_push_notification(token, title, body, user_id=None):
                 except Exception as db_err:
                     print(f"Veritabanı temizlik hatası: {db_err}")
 
+                    
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Alarm sistemini ayrı bir thread'de başlat
