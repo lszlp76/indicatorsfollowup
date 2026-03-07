@@ -1,5 +1,6 @@
 import os
 import json
+import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -149,48 +150,62 @@ def alarm_monitor_system():
             
         # Her 60 saniyede bir tüm alarmları kontrol et
         time.sleep(60)
-
 def send_push_notification(token, title, body, user_id=None, alarm_id=None):
     try:
-        message = messaging.Message(
-            notification=messaging.Notification(
-                title=title,
-                body=body,
-            ),
-            # ANDROID İÇİN: Bildirimlerin üst üste binip ezilmesini engeller
-            android=messaging.AndroidConfig(
-                notification=messaging.AndroidNotification(
-                    tag=str(alarm_id) if alarm_id else "default"
-                )
-            ),
-            # IOS İÇİN: Bildirimlerin üst üste binip ezilmesini engeller
-            apns=messaging.APNSConfig(
-                headers={
-                    'apns-collapse-id': str(alarm_id) if alarm_id else "default"
-                }
-            ),
-            token=token,
-        )
-        response = messaging.send(message)
-        print(f"📨 Bildirim Gönderildi: {response}")
-        return response
-    except Exception as e:
-        error_msg = str(e)
-        print(f"❌ FCM Gönderim Hatası: {error_msg}")
+        # 1. Firebase Admin SDK'nın hafızasından CANLI ve GÜVENLİ bir token zorla üretiyoruz
+        app = firebase_admin.get_app()
+        access_token = app.credential.get_access_token().access_token
         
-        # Eğer token ölmüşse veya silinmişse veritabanından temizle
-        if "Requested entity was not found" in error_msg or "Unregistered" in error_msg:
-            print(f"🗑️ Ölü Token Tespit Edildi! (Kullanıcı: {user_id})")
-            if user_id and db:
-                try:
-                    db.collection('users').document(user_id).update({
-                        'fcmToken': firestore.DELETE_FIELD
-                    })
+        # 2. Firebase Proje ID'ni doğrudan yazıyoruz (firebase_options.dart'tan aldım)
+        project_id = os.environ.get("PROJECT_ID")
+        
+        # 3. Yeni V1 API Linki
+        url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
+        
+        # 4. Kütüphanenin unuttuğu o yetki başlığını KENDİ ELLERİMİZLE ekliyoruz
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/json; UTF-8',
+        }
+        
+        # 5. Mesaj İçeriği (APNs ve Android ayarlarıyla birebir aynı)
+        payload = {
+            "message": {
+                "token": token,
+                "notification": {
+                    "title": title,
+                    "body": body
+                },
+                "android": {
+                    "notification": {
+                        "tag": str(alarm_id) if alarm_id else "default"
+                    }
+                },
+                "apns": {
+                    "headers": {
+                        "apns-collapse-id": str(alarm_id) if alarm_id else "default"
+                    }
+                }
+            }
+        }
+        
+        # 6. İsteği Doğrudan Biz Gönderiyoruz (messaging.send kullanmadan)
+        response = requests.post(url, headers=headers, json=payload)
+        
+        if response.status_code == 200:
+            print(f"📨 Bildirim Gönderildi: {response.json()}")
+        else:
+            print(f"❌ FCM V1 Hatası (Kod: {response.status_code}): {response.text}")
+            
+            # Ölü token temizliği (Uygulamayı silen kullanıcılar için)
+            if "UNREGISTERED" in response.text or "NOT_FOUND" in response.text:
+                print(f"🗑️ Ölü Token Tespit Edildi! (Kullanıcı: {user_id})")
+                if user_id and db:
+                    db.collection('users').document(user_id).update({'fcmToken': firestore.DELETE_FIELD})
                     print("✅ Ölü token veritabanından silindi.")
-                except Exception as db_err:
-                    print(f"Veritabanı temizlik hatası: {db_err}")
-
                     
+    except Exception as e:
+        print(f"❌ Kritik Gönderim Hatası: {e}")                 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Alarm sistemini ayrı bir thread'de başlat
