@@ -131,7 +131,7 @@ def send_push_notification(token, title, body, user_id=None, alarm_id=None):
     try:
         app = firebase_admin.get_app()
         access_token = app.credential.get_access_token().access_token
-        project_id = os.environ.get("PROJECT_ID", "indicators-26c7f")
+        project_id = os.environ.get("PROJECT_ID")
         url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
         headers = {'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/json; UTF-8'}
         payload = {
