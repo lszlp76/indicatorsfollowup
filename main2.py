@@ -137,18 +137,37 @@ def send_push_notification(token, title, body, user_id=None, alarm_id=None):
         payload = {
             "message": {
                 "token": token,
-                "notification": {"title": title, "body": body},
-                "android": {"notification": {"tag": str(alarm_id) if alarm_id else "default"}},
-                "apns": {"headers": {"apns-collapse-id": str(alarm_id) if alarm_id else "default"}}
+                "notification": {
+                    "title": title,
+                    "body": body
+                },
+                "android": {
+                    "notification": {
+                        "tag": str(alarm_id) if alarm_id else "default"
+                    }
+                },
+                "apns": {
+                    "headers": {
+                        "apns-collapse-id": str(alarm_id) if alarm_id else "default"
+                    }
+                }
             }
         }
         response = requests.post(url, headers=headers, json=payload)
-        if response.status_code != 200:
-            if "UNREGISTERED" in response.text:
-                db.collection('users').document(user_id).update({'fcmToken': firestore.DELETE_FIELD})
+        if response.status_code == 200:
+            print(f"📨 Bildirim Gönderildi: {response.json()}")
+        else:
+            print(f"❌ FCM V1 Hatası (Kod: {response.status_code}): {response.text}")
+            
+            # Ölü token temizliği (Uygulamayı silen kullanıcılar için)
+            if "UNREGISTERED" in response.text or "NOT_FOUND" in response.text:
+                print(f"🗑️ Ölü Token Tespit Edildi! (Kullanıcı: {user_id})")
+                if user_id and db:
+                    db.collection('users').document(user_id).update({'fcmToken': firestore.DELETE_FIELD})
+                    print("✅ Ölü token veritabanından silindi.")
+                    
     except Exception as e:
-        print(f"❌ Bildirim Hatası: {e}")
-
+        print(f"❌ Kritik Gönderim Hatası: {e}")     
 # --- ANALİZ MOTORU ---
 
 def calculate_rsi(series, period=14):
@@ -196,11 +215,21 @@ def process_stock_analysis(symbol, rsi_interval, price_interval):
 # --- FASTAPI SETUP ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    threading.Thread(target=alarm_monitor_system, daemon=True).start()
+    # Alarm sistemini ayrı bir thread'de başlat
+    alarm_thread = threading.Thread(target=alarm_monitor_system, daemon=True)
+    alarm_thread.start()
+    
     yield
 
 app = FastAPI(lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/")
 def read_root(): return {"status": "running"}
