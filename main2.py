@@ -135,24 +135,34 @@ def send_push_notification(token, title, body, user_id=None, alarm_id=None):
         url = f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
         headers = {'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/json; UTF-8'}
         payload = {
-            "message": {
-                "token": token,
+        "message": {
+            "token": token,
+            "notification": {
+                "title": title,
+                "body": body
+            },
+            "android": {
+                "priority": "high", # Cihazı derin uykudan uyandırır
                 "notification": {
-                    "title": title,
-                    "body": body
-                },
-                "android": {
-                    "notification": {
-                        "tag": str(alarm_id) if alarm_id else "default"
+                    "sound": "default", # Android için varsayılan ses
+                    "default_vibrate_timings": True, # Varsayılan titreşim
+                    "tag": str(alarm_id) if alarm_id else "default"
+                }
+            },
+            "apns": {
+                "payload": {
+                    "aps": {
+                        "sound": "default", # iOS için varsayılan ses
+                        "content-available": 1 # Arka plan işlemleri için
                     }
                 },
-                "apns": {
-                    "headers": {
-                        "apns-collapse-id": str(alarm_id) if alarm_id else "default"
-                    }
+                "headers": {
+                    "apns-collapse-id": str(alarm_id) if alarm_id else "default",
+                    "apns-priority": "10" # iOS anlık gönderim önceliği
                 }
             }
         }
+    }
         response = requests.post(url, headers=headers, json=payload)
         if response.status_code == 200:
             print(f"📨 Bildirim Gönderildi: {response.json()}")
